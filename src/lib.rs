@@ -2,12 +2,12 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
-use esp_hal as hal;
-
 use embassy_futures::join::*;
-use hal::gpio::*;
-use hal::peripheral::*;
-use hal::rmt::{asynch::*, PulseCode, RxChannelConfig, TxChannelConfig, *};
+use esp_hal::{
+    gpio::*,
+    peripheral::*,
+    rmt::{PulseCode, RxChannelConfig, TxChannelConfig, *},
+};
 
 pub struct OneWire<R: RxChannelAsync, T: TxChannelAsync> {
     rx: R,
@@ -16,32 +16,27 @@ pub struct OneWire<R: RxChannelAsync, T: TxChannelAsync> {
 
 impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     pub fn new<
-        'd,
-        Tx: TxChannelCreatorAsync<'d, T, P>,
-        Rx: RxChannelCreatorAsync<'d, R, P>,
-        P: 'd + InputPin + OutputPin + Peripheral<P = P>,
+        'a,
+        Tx: TxChannelCreatorAsync<'a, T, P>,
+        Rx: RxChannelCreatorAsync<'a, R, P>,
+        P: 'a + InputPin + OutputPin + Peripheral<P = P>,
     >(
-        txcc: Tx,
-        rxcc: Rx,
+        tx: Tx,
+        rx: Rx,
         mut pin: P,
     ) -> OneWire<R, T> {
-        let rx_config = RxChannelConfig {
-            clk_divider: 80,
-            idle_threshold: 1000,
-            filter_threshold: 10,
-            carrier_modulation: false,
-            ..RxChannelConfig::default()
-        };
-        let tx_config = TxChannelConfig {
-            clk_divider: 80,
-            carrier_modulation: false,
-            ..TxChannelConfig::default()
-        };
-
-        let tx = txcc
+        let rx_config = RxChannelConfig::default()
+            .with_clk_divider(80)
+            .with_idle_threshold(1000)
+            .with_filter_threshold(10)
+            .with_carrier_modulation(false);
+        let tx_config = TxChannelConfig::default()
+            .with_clk_divider(80)
+            .with_carrier_modulation(false);
+        let tx = tx
             .configure(unsafe { pin.clone_unchecked() }, tx_config)
             .unwrap();
-        let rx = rxcc
+        let rx = rx
             .configure(unsafe { pin.clone_unchecked() }, rx_config)
             .unwrap();
         let mut pin = unsafe { pin.clone_unchecked() };
@@ -49,21 +44,26 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
         pin.internal_pull_up(true, unsafe { core::mem::transmute(Tag) });
         pin.enable_output(true, unsafe { core::mem::transmute(Tag) });
         pin.enable_input(true, unsafe { core::mem::transmute(Tag) });
-        pin.set_drive_strength(hal::gpio::DriveStrength::I40mA, unsafe { core::mem::transmute(Tag) });
+        pin.set_drive_strength(esp_hal::gpio::DriveStrength::I40mA, unsafe {
+            core::mem::transmute(Tag)
+        });
         pin.enable_open_drain(true, unsafe { core::mem::transmute(Tag) });
         // let flexpin=Flex::new(pin);
         // flexpin.peripheral_input().inverted().connect_input_to_peripheral(hal::gpio::InputSignal::RMT_SIG_0, unsafe { core::mem::transmute(Tag) });
         // flexpin.into_peripheral_output().inverted().connect_peripheral_to_output(hal::gpio::OutputSignal::RMT_SIG_0, unsafe { core::mem::transmute(Tag) });
-        
-        
-        pin.connect_input_to_peripheral_with_options(hal::gpio::InputSignal::RMT_SIG_0, true, true, unsafe { core::mem::transmute(Tag) });
+        pin.connect_input_to_peripheral_with_options(
+            esp_hal::gpio::InputSignal::RMT_SIG_0,
+            true,
+            true,
+            unsafe { core::mem::transmute(Tag) },
+        );
         pin.connect_peripheral_to_output_with_options(
-            hal::gpio::OutputSignal::RMT_SIG_0,
+            esp_hal::gpio::OutputSignal::RMT_SIG_0,
             true,
             false,
             false,
             true,
-            unsafe { core::mem::transmute(Tag) }
+            unsafe { core::mem::transmute(Tag) },
         );
 
         OneWire { rx, tx }
@@ -71,35 +71,25 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
 
     pub async fn reset(&mut self) -> bool {
         let data = [
-            PulseCode {
-                level1: false,
-                length1: 60,
-                level2: true,
-                length2: 600,
-            },
-            PulseCode {
-                level1: false,
-                length1: 600,
-                level2: false,
-                length2: 0,
-            },
-            PulseCode::default(),
+            PulseCode::new(Level::Low, 60, Level::High, 600),
+            PulseCode::new(Level::Low, 600, Level::Low, 0),
+            PulseCode::empty(),
         ];
-        let mut indata = [PulseCode::default(); 10];
+        let mut indata = [PulseCode::empty(); 10];
 
         // TODO: error handling
         let _res = self.send_and_receive(&mut indata, &data).await;
 
-        indata[0].length1 > 0
-            && indata[0].length2 > 0
-            && indata[1].length1 > 100
-            && indata[1].length1 < 200
+        indata[0].length1() > 0
+            && indata[0].length2() > 0
+            && indata[1].length1() > 100
+            && indata[1].length1() < 200
     }
 
     pub async fn send_and_receive(
         &mut self,
-        indata: &mut [PulseCode],
-        data: &[PulseCode],
+        indata: &mut [u32],
+        data: &[u32],
     ) -> Result<(), esp_hal::rmt::Error> {
         // This relies on join polling in order to set up the rx & tx registers, which is not strictly documented behavior.
         let res = join(self.rx.receive(indata), self.tx.transmit(data)).await;
@@ -109,26 +99,26 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     const ZERO_BIT_LEN: u16 = 70;
     const ONE_BIT_LEN: u16 = 3;
 
-    pub fn encode_bit(bit: bool) -> PulseCode {
+    pub fn encode_bit(bit: bool) -> u32 {
         if bit {
-            PulseCode {
-                length1: Self::ONE_BIT_LEN,
-                level1: true,
-                length2: Self::ZERO_BIT_LEN,
-                level2: false,
-            }
+            PulseCode::new(
+                Level::High,
+                Self::ONE_BIT_LEN,
+                Level::Low,
+                Self::ZERO_BIT_LEN,
+            )
         } else {
-            PulseCode {
-                length1: Self::ZERO_BIT_LEN,
-                level1: true,
-                length2: Self::ONE_BIT_LEN,
-                level2: false,
-            }
+            PulseCode::new(
+                Level::High,
+                Self::ZERO_BIT_LEN,
+                Level::Low,
+                Self::ONE_BIT_LEN,
+            )
         }
     }
 
-    pub fn decode_bit(code: PulseCode) -> bool {
-        let len = code.length1;
+    pub fn decode_bit(code: u32) -> bool {
+        let len = code.length1();
         if len < 20 {
             true
         } else {
@@ -137,8 +127,8 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     }
 
     pub async fn exchange_byte(&mut self, byte: u8) -> u8 {
-        let mut data = [PulseCode::default(); 10];
-        let mut indata = [PulseCode::default(); 10];
+        let mut data = [PulseCode::empty(); 10];
+        let mut indata = [PulseCode::empty(); 10];
         for n in 0..8 {
             data[n] = Self::encode_bit(0 != byte & 1 << n);
         }
@@ -154,7 +144,7 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     }
 
     pub async fn send_byte(&mut self, byte: u8) {
-        let mut data = [PulseCode::default(); 10];
+        let mut data = [PulseCode::empty(); 10];
         for n in 0..8 {
             data[n] = Self::encode_bit(0 != byte & 1 << n);
         }
@@ -166,8 +156,8 @@ impl<R: RxChannelAsync, T: TxChannelAsync> OneWire<R, T> {
     where
         [(); N + 1]:,
     {
-        let mut data = [PulseCode::default(); N + 1];
-        let mut indata = [PulseCode::default(); N + 1];
+        let mut data = [PulseCode::empty(); N + 1];
+        let mut indata = [PulseCode::empty(); N + 1];
         for n in 0..N {
             data[n] = Self::encode_bit(bits[n]);
         }
@@ -203,16 +193,17 @@ impl core::fmt::Debug for Address {
 impl core::fmt::Display for Address {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
         for k in self.0.to_le_bytes() {
-		core::write!(f, "{:X}", k)?;
+            core::write!(f, "{:X}", k)?;
         }
         Ok(())
     }
 }
 
+/// Search
 pub struct Search {
     command: u8,
     address: u64,
-    #[cfg(feature = "search-masks")]
+    #[cfg(feature = "search_masks")]
     address_mask: u64,
     last_discrepancy: Option<usize>,
     complete: bool,
@@ -229,23 +220,25 @@ impl Search {
         Search {
             command: 0xF0,
             address: 0,
-            #[cfg(feature = "search-masks")]
+            #[cfg(feature = "search_masks")]
             address_mask: 0,
             last_discrepancy: None,
             complete: false,
         }
     }
+
     pub fn new_alarm() -> Search {
         Search {
             command: 0xEC,
             address: 0,
-            #[cfg(feature = "search-masks")]
+            #[cfg(feature = "search_masks")]
             address_mask: 0,
             last_discrepancy: None,
             complete: false,
         }
     }
-    #[cfg(feature = "search-masks")]
+
+    #[cfg(feature = "search_masks")]
     pub fn new_with_mask(fixed_bits: u64, bit_mask: u64) {
         Search {
             command: 0xEC,
@@ -255,6 +248,7 @@ impl Search {
             complete: false,
         }
     }
+
     pub async fn next<R: RxChannelAsync, T: TxChannelAsync>(
         &mut self,
         ow: &mut OneWire<R, T>,
@@ -269,7 +263,7 @@ impl Search {
             for id_bit_number in 0..64 {
                 let id_bits = ow.exchange_bits([true, true]).await;
                 let search_direction = match id_bits {
-                    #[cfg(feature = "search-masks")]
+                    #[cfg(feature = "search_masks")]
                     _ if address_mask & (1 << id_bit_number) != 0 => {
                         address & (1 << id_bit_number) != 0
                     }
